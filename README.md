@@ -37,15 +37,27 @@ We employ a **Bayesian hierarchical modeling approach** with the following compo
 - Gamma distribution for positive, right-skewed economic data.
 - Log-link function to ensure positivity and model multiplicative effects.
 
+### 3. **Inference & Computation**
+- **Algorithm:** Integrated Nested Laplace Approximation (INLA) via the `INLA` package.
+- **Advantages:** Deterministic, fast, and scalable for high-dimensional latent Gaussian models.
+- **Model Comparison:** WAIC, DIC, log-CPO, and marginal likelihood (MLIK).
+
 #### **Linear Predictor:**
 For **municipality-level** :
 
 $$ log(μ_i) = \alpha + \beta_1 · NTL_i + \phi_i^{(m)} + \phi _i^{(r)} $$
 
+<div align="left">
+  <img src="./images/models-mun.png" alt="Project Structure" width="420">
+</div>
+
 For **province-level** (spatio-temporal):
 
 $$ log(μ_{it}) = α + ψ_r + \beta_1· NTL_{it} + φ_i^{(p)} + δ_t $$
 
+<div align="left">
+  <img src="./images/models_prov.png" alt="Project Structure" width="400">
+</div>
 
 Where:
 - `α`: global intercept
@@ -53,17 +65,6 @@ Where:
 - `φ`: spatial random effects (ICAR prior)
 - `ψ_r`: regional random intercept
 - `δ_t`: temporal random effect (RW1 prior)
-
-#### **Priors:**
-- Fixed effects: weakly informative Gaussian priors.
-- Spatial effects: Intrinsic Conditional Autoregressive (ICAR) prior.
-- Temporal effects: Random Walk of order 1 (RW1).
-- Hyperparameters: LogGamma() and tested Penalized Complexity (PC) priors.
-
-### 3. **Inference & Computation**
-- **Algorithm:** Integrated Nested Laplace Approximation (INLA) via the `INLA` package.
-- **Advantages:** Deterministic, fast, and scalable for high-dimensional latent Gaussian models.
-- **Model Comparison:** WAIC, DIC, log-CPO, and marginal likelihood (MLIK).
 
 ### 4. **Spatio-Temporal Structures**
 We considered and tested four interaction types (Knorr-Held, 2000) for the provincial model, while the municipal model uses a multi-scale spatial hierarchy.
