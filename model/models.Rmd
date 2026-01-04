@@ -1,0 +1,599 @@
+---
+title: "codici"
+author: "Andrea Sciortino"
+date: "2025-11-17"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+# Load libraries, data, functions and spatial graphs
+
+```{r warning=FALSE, include=FALSE}
+library(readr)
+library(viridis)
+library(tibble)
+library(blackmarbler)
+library(geodata)
+library(sf)
+library(terra)
+library(ggplot2)
+library(tidyterra)
+library(lubridate)
+library(readr)
+library(dplyr)
+library(spdep)
+library(INLA)
+library(gridExtra)
+library(ggpubr)
+library(igraph)
+library(ggExtra)
+library(patchwork)
+
+enhanced_normalize_names <- function(x) {
+  x <- tolower(iconv(x, to = "ASCII//TRANSLIT")) # remove accents, lower case
+  x <- gsub("[.,]", "", x)                       # remove periods and commas
+  x <- gsub("\\s*['`]\\s*", " ", x)              # normalize apostrophes and spacing
+  x <- gsub("\\s+", " ", x)                      # normalize whitespace
+  x <- gsub("^\\s+|\\s+$", "", x)                # remove leading/trailing whitespace
+  x <- gsub("\\s*\\([^)]*\\)", "", x)            # remove content in parentheses
+  x <- gsub("\\s*-\\s*", " ", x)                 # normalize hyphens
+  x <- gsub("\\s+", "", x)                       # REMOVE ALL SPACES
+  return(x)
+}
+
+
+compare_models <- function(fits, names, 
+                          metrics = c("dic", "waic", "cpo", "mlik")) {
+  
+  results <- data.frame(Model = names)
+  
+  # Metric calculation functions
+  metric_functions <- list(
+    dic = function(fit) fit$dic$dic,
+    waic = function(fit) fit$waic$waic,
+    cpo = function(fit) -mean(log(fit$cpo$cpo), na.rm = TRUE),
+    mlik = function(fit) fit$mlik[1, 1]
+  )
+  
+  for(metric in metrics) {
+    if(metric %in% names(metric_functions)) {
+      results[[toupper(metric)]] <- sapply(fits, metric_functions[[metric]])
+    }
+  }
+  return(results)
+}
+
+fit_inla_gamma <- function(formula, data) {
+  # formula: R formula for the linear predictor
+  # data: data.frame containing response and covariates 
+  
+  result <- inla(
+    formula,
+    family = "gamma",
+    data = data,
+    control.compute = list(dic = TRUE, cpo = TRUE, waic = TRUE),
+    verbose = FALSE
+  )
+  
+  return(result)
+}
+```
+
+# Hierarchical Bayesian Model
+
+In this section we describe the Bayesian hierarchical model three layes structure used to investigate latent field processes influencing the economic output and the relationship with nighttime lights.
+
+-   ***Data Likelihood***: assumed the distribution Gamma, the two
+    parameters $Y_i = Gamma( \alpha, b )$ define its distribution,
+    where $\alpha$ is the shape parameter and $\beta$ is the rate
+    parameter. We can the reformulate the distribution to obtain
+    $E[Y_i] = \mu= \alpha / b$ and $Var[Y_i] = \alpha / b^2$
+    $$ Y_i \sim Gamma(\mu, \sigma^2)$$
+
+-   ***Model Process***: in order to incorporate information from the
+    nighttime lights, the spacial structured effect and the unstructured
+    effect, we used the logarithmic link function.
+
+$$
+log(E[Y_i]) = \eta_i = \beta_0 + \beta_1 \text{X}_{NTL} + \mathbf{v}_i
+$$ 
+
+where: (Fixed Effect)
+- $\beta_0$ intercept
+- $\beta_1$ linear parameter for regression associated to nighttime lights
+- $X_i$ mean nighttime lights radiance for each province
+
+(Structured Spatial Random Effect) 
+- $\mathbf{v_i}$ has a ICAR distribution
+
+$$\left[\mathbf{v_i} \mid \mathbf{v}_{j, j \neq i}, \tau_{v}^2\right] \sim N \left( \frac{1}{\sum_{j} w_{ij}} \sum_{j} v_j w_{ij},  \ \ \tau_{i}^2 = \frac{1}{\tau_{v}^2 \times \sum_{j} w_{ij}} \right)$$
+
+-   ***Priors***: priors need to be choose, but assuming a
+    non-informative prior will result in observing the data for
+    inference without adding some prior belief on the distribution of
+    the parameters.
+    
+
+### Data
+
+```{r include=FALSE}
+df.comuni = readRDS("~/Desktop/night-lights/comuni_data.rds")
+df.province = readRDS("~/Desktop/night-lights/province_data.rds.rds")
+
+df.comuni <- df.comuni %>%
+  mutate(
+    S = 1:n(),
+    regione = as.numeric(as.factor(NAME_1))
+  )
+
+df.province <- df.province %>%
+  mutate(
+    year_idx = as.numeric(factor(year)), # 1-11 indexing
+    space_time = 1:n(),             # Unique space-time IDs (for Type I)
+    area_id_int = S,
+    year_idx_int = year_idx,
+    regione = as.numeric(as.factor(NAME_1))
+  )
+
+gdp.inla.graph = "~/gdp.graph.province"
+gdp.inla.graph.comuni = "~/gdp.graph.comuni"
+gdp.inla.graph.region = "~/gdp.graph.region"
+gdp.inla.graph.province = "~/gdp.graph.PROV"
+
+```
+
+## Comuni
+
+```{r}
+model.com.1 = gdp ~ 1 + 
+  ntl_mean 
+
+model.com.2 = gdp ~ 1 + 
+  ntl_mean +
+  f(S, model="besag", graph=gdp.inla.graph.comuni)
+
+fit1 = fit_inla_gamma(model.com.1, df.comuni)
+fit2 = fit_inla_gamma(model.com.2, df.comuni)
+```
+
+
+```{r}
+
+model1 = gdp ~ 1 + 
+  ntl_mean +
+  f(S, model="besag", graph=gdp.inla.graph.comuni) +
+  f(regione, model="besag", graph = gdp.inla.graph.region, constr=TRUE)
+
+fit3 <- inla(
+    model1,
+    family = "gamma",
+    data = df.comuni,
+    control.compute = list(dic = TRUE, cpo = TRUE, waic = TRUE),
+    verbose = FALSE,
+    control.predictor = list(compute = TRUE)
+  )
+
+summary(fit3)
+```
+
+```{r}
+inla.priors.used(fit3)
+```
+
+## Province
+
+```{r include=FALSE}
+unique_provinces_sf <- df.province %>%
+  group_by(name) %>%
+  slice(1) %>%
+  ungroup() %>%
+  arrange(name)  # Sort alphabetically by province name
+
+# Create adjacency matrix
+neighbors <- poly2nb(unique_provinces_sf)
+adj_matrix <- nb2mat(neighbors, style = "B", zero.policy = TRUE)
+
+# Use province NAMES (not S) as dimension names
+province_names_sorted <- sort(unique(df.province$name))
+rownames(adj_matrix) <- province_names_sorted
+colnames(adj_matrix) <- province_names_sorted
+
+# Create INLA graph
+gdp.inla.graph1 <- inla.read.graph(adj_matrix)
+
+df.province$name1 <- as.numeric(as.factor(df.province$name))
+```
+
+```{r}
+model.province1 = gdp ~ 1 + ntl_mean
+
+model.province2 = gdp ~ 1 + ntl_mean +
+  f(name1, model="besag", graph = gdp.inla.graph1)
+
+model.province3 = gdp ~ 1 + ntl_mean +
+  f(name1, model="besag", graph = gdp.inla.graph1) +
+  f(year, model = "rw1")
+
+fit.pro1 = fit_inla_gamma(model.province1, df.province)
+fit.pro2 = fit_inla_gamma(model.province2, df.province)
+fit.pro3 = fit_inla_gamma(model.province3, df.province)
+```
+
+```{r}
+summary(fit.pro3)
+```
+
+
+```{r}
+model.provincea = gdp ~ 1 + ntl_mean + 
+  f(year, model = "ar1")
+
+model.provincerw = gdp ~ 1 + ntl_mean + 
+  f(year, model = "rw1")
+
+model.provinceaa = gdp ~ 1 + ntl_mean +
+  f(name1, model="besag", graph = gdp.inla.graph1) +
+  f(year, model = "ar1")
+  
+model.provinceaaa = gdp ~ 1 + ntl_mean +
+  f(regione, model = "iid") +
+  f(name1, model="besag", graph = gdp.inla.graph1) +
+  f(year, model = "ar1")
+
+fit.proa = fit_inla_gamma(model.provincea, df.province)
+fit.proaa = fit_inla_gamma(model.provinceaa, df.province)
+fit.proaaa = fit_inla_gamma(model.provinceaaa, df.province)
+fit.provrw = fit_inla_gamma(model.provincerw, df.province)
+```
+
+```{r}
+model_fits_province <- list(fit.pro1, fit.pro2, fit.pro3, fit.pro4, fit.proa, fit.proaa, fit.proaaa, fit.provrw)
+model_names_province <- c("base", "spatial", "spatial + temp", "final", "temp AR1", "spatial + temp AR1", "spatial + region + temp AR1", "temp RW1")
+
+comparison_province <- compare_models(model_fits_province, model_names_province )
+comparison_province
+```
+
+
+```{r}
+model.prov.final = gdp ~ 1 + ntl_mean +
+  f(regione, model = "iid") +
+  f(name1, model="besag", graph = gdp.inla.graph1) +
+  f(year, model = "rw1")
+
+fit.pro4 <- inla(
+    model.prov.final,
+    family = "gamma",
+    data = df.province,
+    control.compute = list(dic = TRUE, cpo = TRUE, waic = TRUE),
+    verbose = FALSE 
+  )
+
+summary(fit.pro4)
+```
+
+```{r}
+inla.priors.used(fit.pro4)
+```
+
+### Comparison of Models
+
+```{r}
+model_fits_comuni <- list(fit1, fit2, fit3)
+model_names_comuni <- c("base", "spatial", "final")
+
+comparison_comuni <- compare_models(model_fits_comuni, model_names_comuni)
+comparison_comuni
+```
+
+```{r}
+model_fits_province <- list(fit.pro1, fit.pro2, fit.pro3, fit.pro4)
+model_names_province <- c("base", "spatial", "spatial + temp", "final")
+
+comparison_province <- compare_models(model_fits_province, model_names_province, )
+comparison_province
+```
+
+```{r}
+# Models
+# Normal-scale
+model1 = gdp ~ 1 + f(U, model='iid') + f(S, model="besag", graph=gdp.inla.graph)
+
+# Logaritmic-scale
+model2 = log(gdp) ~ 1 +
+  f(U, model='iid') + f(S, model="besag", graph=gdp.inla.graph)
+
+# Logaritmic-scale + night-light
+model3 = log(gdp) ~ 1 + ntl_mean +
+  f(U, model='iid') + f(S, model="besag", graph=gdp.inla.graph)
+
+# Logaritmic-scale + log(night-light)
+model4 = log(gdp) ~ 1 + log(ntl_mean) +
+  f(U, model='iid') + f(S, model="besag", graph=gdp.inla.graph)
+
+# Logaritmic-scale + log(night-light) + educations
+model5 = log(gdp) ~ 1 + log(ntl_mean) + educations +
+  f(U, model='iid') + f(S, model="besag", graph=gdp.inla.graph)
+
+# Logaritmic-scale + log(night-light) + employment
+model6 = log(gdp) ~ 1 + log(ntl_mean) + employments +
+  f(U, model='iid') + f(S, model="besag", graph=gdp.inla.graph)
+
+# Logaritmic-scale + log(night-light) + population
+model7 = log(gdp) ~ 1 + log(ntl_mean) + populations +
+  f(U, model='iid') + f(S, model="besag", graph=gdp.inla.graph)
+
+# Logaritmic-scale + log(night-light) + population + education
+model8 = log(gdp) ~ 1 + log(ntl_mean) + populations + employments +
+  f(U, model='iid') + f(S, model="besag", graph=gdp.inla.graph)
+
+
+fit1 = fit_inla_model(model1, df.prov, gdp.inla.graph)
+fit2 = fit_inla_model(model2, df.prov, gdp.inla.graph)
+fit3 = fit_inla_model(model3, df.prov, gdp.inla.graph)
+fit4 = fit_inla_model(model4, df.prov, gdp.inla.graph)
+fit5 = fit_inla_model(model5, df.prov, gdp.inla.graph)
+fit6 = fit_inla_model(model6, df.prov, gdp.inla.graph)
+fit7 = fit_inla_model(model7, df.prov, gdp.inla.graph)
+fit8 = fit_inla_model(model8, df.prov, gdp.inla.graph)
+```
+
+
+# EDA
+
+The core objective of this phase is to have a wide view of the data, use descriptive analysis to summaries it and choose a suitable distribution, witch will be fundamental for the further analysis. As the distribution of the variable represent an assumption we need to start from here.
+
+### Economic Response Variable
+
+```{r echo=FALSE}
+# Histogram of GDP
+p1 = ggplot(df.prov.2022, aes(x = gdp)) +
+  geom_histogram(bins = 25, fill = "steelblue", color = "white") +
+  labs(title = "Histogram of GDP", x = "GDP", y = "Count") +
+  theme_minimal()
+
+# Histogram of ntl_mean
+p2 = ggplot(df.prov.2022, aes(x = log(gdp))) +
+  geom_histogram(bins = 25, fill = "steelblue", color = "grey") +
+  labs(title = "Histogram of Log(GDP)", x = "GDP", y = "Count") +
+  theme_minimal()
+
+p1 + plot_annotation(title = "Distribution of Economic Output: Province")
+```
+
+```{r echo=FALSE}
+# Histogram of GDP
+p1 = ggplot(df.comuni.2023, aes(x = gdp)) +
+  geom_histogram(bins = 80, fill = "steelblue", color = "white") +
+  labs(title = "Histogram of Total IRPEF Income", x = "Income", y = "Count") +
+  theme_minimal()
+
+p2 = ggplot(df.comuni.2023, aes(x = log(gdp))) +
+  geom_histogram(bins = 50, fill = "blue2", color = "white") +
+  labs(title = "Histogram of Log(Total IRPEF Income)", x = "Log(Income)", y = "Count") +
+  theme_minimal()
+
+p1 + p2 + plot_annotation(title = "Distribution of Economic Output: Municipality")
+```
+
+After this exploration we need to make assumption for distribution for the response variable, in order to fit the models, we decided as follow: 
+
+ - provincial-level: due to the skewness of the data and issue
+with symmetry, we will assume the Normal distribution for the initial
+frequentist model for simplicity in order to avoid GLM, but in the
+stochastic process model (Bayesian) the Gamma distribution better suit
+for this case. 
+ 
+ - municipality-level: for the same reason, the response
+variable has been converted in logarithmic-scale, this procedure is
+theoretically guaranteed and the distribution better suit for a Normal
+distribution, there will be used for the model.
+
+### Covariates
+
+```{r echo=FALSE}
+# Histogram of ntl_mean
+p4 = ggplot(df.prov.2022, aes(x = log(ntl_mean))) +
+  geom_histogram(bins = 35, fill = "darkgreen", color = "black") +
+  labs(title = "Log(NTL Mean)", x = "Log(NTL Mean)", y = "Count") +
+  theme_minimal()
+# Histogram of ntl_mean
+p3 = ggplot(df.prov.2022, aes(x = ntl_mean)) +
+  geom_histogram(bins = 35, fill = "darkgreen", color = "black") +
+  labs(title = "NTL Mean", x = "NTL Mean", y = "Count") +
+  theme_minimal()
+
+# Histogram of ntl_mean
+p6 = ggplot(df.comuni.2023, aes(x = log(ntl_mean))) +
+  geom_histogram(bins = 70, fill = "darkgreen", color = "black") +
+  labs(title = "Log(NTL Mean) - Comuni", x = "Log(NTL Mean)", y = "Count") +
+  theme_minimal()
+# Histogram of ntl_mean
+p5 = ggplot(df.comuni.2023, aes(x = ntl_mean)) +
+  geom_histogram(bins = 70, fill = "darkgreen", color = "black") +
+  labs(title = "NTL Mean - Comuni", x = "NTL Mean", y = "Count") +
+  theme_minimal()
+
+p3 + p4 + p5 + p6 + plot_annotation(title = "Distribution of the covariate: Province & Comuni")
+```
+
+# ADDITIONAL: Spatial Autocorrelation [ and addition frequentist traditional model ]
+In spatial data analysis, it is common to encounter situations where we need to choose and construct the spatial structure in order to account for this conditional dependency.
+
+## Neighborhood Structure
+
+```{r}
+nb.prov = poly2nb(df.prov.2022, snap = 15)  # Queen contiguity by default
+nb2INLA("gdp.graph.prov", nb.prov)         
+gdp.inla.graph = "gdp.graph.prov"
+
+listw.prov = nb2listw(nb.prov, 
+                      style = "W",  # Row-standardized
+                      zero.policy = TRUE)  # Possible zero-length weights vectors
+
+nb.comuni = poly2nb(df.comuni.2023, snap = 15)
+nb2INLA("gdp.graph.comuni", nb.comuni)         
+gdp.inla.graph.comuni = "gdp.graph.comuni"
+
+listw.comuni = nb2listw(nb.comuni, 
+                        style = "W", 
+                      zero.policy = TRUE)
+```
+
+> The function builds a neighbours list based on regions with contiguous
+> boundaries, that is sharing one or more boundary point.
+
+## Spatial Dependency Measure
+
+**Note**: We proceed to investigate spatial autocorrelation using
+Moran's I statistic, it measure and quantifies the degree to which
+similar values for a variable cluster together in space. The null
+hypothesis test if values of the variable are distributed randomly
+across the spatial units. Different assumption are made in order to
+correctly interpreted this measure:
+
+-   Stationary: the process governing the spatial dependence is assumed
+    to be constant across the area
+-   Weights dependency: the spatial autocorrelation do not exists in an
+    absolute sense, it is only detectable under the specified
+    neighborhood structure (adjacency).
+-   Constant weight effect: equal spatial weights for one unit imply
+    that all neighborhood equally influence the variable value
+-   Residual: in order to demonstrate the violation of the linear
+    regression assumption, we need to test the residual as assumed
+    i.i.d. (different if we consider 'moran.test' or 'lm.morantest',
+    first test the variable the other residuals)
+
+> *Does the economic wealth/variable aggregated at province and
+> municipality level shows a spatial autocorrelation ?*
+
+```{r}
+moran.test(
+  df.prov.2022$gdp, 
+  listw = listw.prov
+  )
+
+# moran.test(
+#  df.comuni.2023$gdp, 
+#  listw = listw.comuni
+#  )
+
+moran.test(
+  log(df.comuni.2023$gdp), 
+  listw = listw.comuni
+  )
+```
+
+We verify the presence of autocorrelation in the response variable and spatially it do not show a random distribution across space. The positive coefficient is tested and statistical significant for both level of analysis.
+
+```{r echo=FALSE}
+# moran.plot(
+#  df.comuni.2023$gdp, 
+#  listw = listw.comuni
+#  )
+
+moran.plot(
+  log(df.comuni.2023$gdp), 
+  listw = listw.comuni
+  )
+
+moran.plot(
+  df.prov.2022$gdp, 
+  listw = listw.prov
+  )
+```
+
+> The regression line is the global Moran’s Index. The spatially lagged
+> value is a weighted average of the values from neighboring locations.
+
+**Important**: Apparent autocorrelation, such as found in the previous
+sections, may instead be caused by some underlying factors, here we
+testing only the output variable. We can add predictors and complexity
+to the model in order to answer: *What could be some
+spatially-distributed causes of economic wealth ?*
+
+Now we can check the linear model for spatial correlation of the
+residuals, to test the violation of the linear model assumption.
+
+```{r}
+lm.morantest(
+  lm_log_model.comuni,
+  listw.comuni
+)
+
+lm.morantest(
+  lm_model.prov,
+  listw.prov
+)
+```
+
+```{r eval=FALSE, include=FALSE}
+# lm.morantest(
+#  lm_model.comuni,
+#   listw.comuni
+# )
+```
+
+**Interpretation**: The probability that we would be wrong to reject the
+null hypothesis of no spatial correlation in the residuals is extremely
+low for the standard linear model at province-level and log-linear model
+at municipality-level.
+
+From this model on residual we are testing the indipendence of the residual, whitch show spatial correlation violating the indipendent assumption. 
+
+## Autoregressive Models
+
+### Simultaneous Autoregressive Models
+
+In the linear model of the previous section we did not account for
+spatial autocorrelation of the residuals, which indeed was present. So
+the linear model violated one of its assumptions, i.e., independent
+residuals. To account for this, we should refit the model as an
+autoregressive model which accounts for spatial autocorrelation.
+
+There are three main forms of Simultaneous Autoregressive (SAR) models,
+with different explanations on the source of the autocorrelation of the
+OLS residuals:
+
+-   Spatial error : These imply that there are underlying
+    spatially-correlated predictors which are not included in the linear
+    model predictor list. Residuals are modeled by a regression on the
+    residuals from adjacent areas. Formalized as $Y_i = X^T \beta + e_i$ 
+    and the residual as $e_i = b(Y - X^T\beta) + \epsilon$, where
+    $b$ the spatial dependency and $\epsilon$ represent the errors and
+    are normal-distributed.
+
+[code in another notebook, should I include ?]
+
+-   Spatial lag : These imply that the response variable is influenced
+    by the same response variable in neighboring areas. Formalized as
+    $Y_i = X^T \beta + pWY + \epsilon_i$ where parameter $p$ controls
+    the degree of autocorrelation of the response variable.
+
+[code in another notebook, should I include ?]
+
+-   Spatial Durbin: This model adds another spatial covariance
+    parameter, $\nu$, which controls the degree of influence of the
+    spatial lag of the covariates (predictors). Formalized as
+    $Y_i = X^T \beta + pWY + WX\nu+ \epsilon_i$.
+
+[Anselin Lesson Playlist](https://youtu.be/fdCNctqDyo4?si=9eNk2SNy3N1KQB48)
+
+-   SAR (Simultaneous Autoregressive Models): Models a global,
+    simultaneous spatial dependence process. The value at each location
+    is assumed to be directly influenced by the values at all other
+    locations in the system. Even if the $Y$ appear in the right-side of
+    the equation, this form is not directly estimable via Ordinary Least
+    Squares (OLS). Finding the solution for the coefficients involves
+    solving a linear system that accounts for the spatial structure of
+    the residuals. It is called simultaneous because the values across
+    all locations are determined jointly.
+
+-   CAR (Conditional Autoregressive Model): Models a local, conditional
+    spatial dependence. It specifies that the value at a location, given
+    the values of its immediate neighbors, is independent of all other
+    locations. This is a **Markov Random Field**, and so the Bayesian
+    framework better apply in this context.
+
+

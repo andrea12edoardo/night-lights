@@ -1,0 +1,379 @@
+---
+title: "Visualization"
+author: "Andrea Sciortino"
+date: "2025-12-15"
+output: html_document
+---
+
+# Load Libraries and Functions
+
+```{r warning=FALSE, include=FALSE}
+library(readr)
+library(viridis)
+library(tibble)
+library(blackmarbler)
+library(geodata)
+library(sf)
+library(terra)
+library(ggplot2)
+library(tidyterra)
+library(lubridate)
+library(readr)
+library(dplyr)
+library(spdep)
+library(INLA)
+library(gridExtra)
+library(ggpubr)
+library(igraph)
+library(ggExtra)
+library(patchwork)
+
+enhanced_normalize_names <- function(x) {
+  x <- tolower(iconv(x, to = "ASCII//TRANSLIT")) # remove accents, lower case
+  x <- gsub("[.,]", "", x)                       # remove periods and commas
+  x <- gsub("\\s*['`]\\s*", " ", x)              # normalize apostrophes and spacing
+  x <- gsub("\\s+", " ", x)                      # normalize whitespace
+  x <- gsub("^\\s+|\\s+$", "", x)                # remove leading/trailing whitespace
+  x <- gsub("\\s*\\([^)]*\\)", "", x)            # remove content in parentheses
+  x <- gsub("\\s*-\\s*", " ", x)                 # normalize hyphens
+  x <- gsub("\\s+", "", x)                       # REMOVE ALL SPACES
+  return(x)
+}
+
+
+compare_models <- function(fits, names, 
+                          metrics = c("dic", "waic", "cpo", "mlik")) {
+  
+  results <- data.frame(Model = names)
+  
+  # Metric calculation functions
+  metric_functions <- list(
+    dic = function(fit) fit$dic$dic,
+    waic = function(fit) fit$waic$waic,
+    cpo = function(fit) -mean(log(fit$cpo$cpo), na.rm = TRUE),
+    mlik = function(fit) fit$mlik[1, 1]
+  )
+  
+  for(metric in metrics) {
+    if(metric %in% names(metric_functions)) {
+      results[[toupper(metric)]] <- sapply(fits, metric_functions[[metric]])
+    }
+  }
+  return(results)
+}
+
+fit_inla_gamma <- function(formula, data) {
+  # formula: R formula for the linear predictor
+  # data: data.frame containing response and covariates 
+  
+  result <- inla(
+    formula,
+    family = "gamma",
+    data = data,
+    control.compute = list(dic = TRUE, cpo = TRUE, waic = TRUE),
+    verbose = FALSE
+  )
+  
+  return(result)
+}
+```
+
+```{r include=FALSE}
+df.comuni = readRDS("~/Desktop/night-lights/comuni_analysis.rds")
+df.province = readRDS("~/Desktop/night-lights/province_AAA.rds")
+
+df.comuni <- df.comuni %>%
+  mutate(
+    S = 1:n(),
+    regione = as.numeric(as.factor(NAME_1))
+  )
+
+df.province <- df.province %>%
+  mutate(
+    year_idx = as.numeric(factor(year)), # 1-11 indexing
+    space_time = 1:n(),             # Unique space-time IDs (for Type I)
+    area_id_int = S,
+    year_idx_int = year_idx,
+    regione = as.numeric(as.factor(NAME_1))
+  )
+
+gdp.inla.graph = "/Users/andreasciortino/Desktop/night-lights/gdp.graph.province"
+gdp.inla.graph.comuni = "/Users/andreasciortino/Desktop/night-lights/gdp.graph.comuni"
+gdp.inla.graph.region = "/Users/andreasciortino/Desktop/night-lights/gdp.graph.region"
+gdp.inla.graph.province = "/Users/andreasciortino/Desktop/night-lights/gdp.graph.PROV"
+
+```
+
+# Data Visualization
+
+```{r}
+city_data <- df.comuni %>%
+  filter(NAME_3.x %in% c("MILANO", "MONZA", "PALERMO")) %>%
+  mutate(city_label = case_when(
+    NAME_3.x == "MILANO" ~ "Milan",
+    NAME_3.x == "MONZA" ~ "Monza",
+    NAME_3.x == "PALERMO" ~ "Palermo",
+    TRUE ~ NAME_3.x
+  ))
+
+# Simple minimal plot
+ggplot(df.comuni, aes(x = gdp)) +
+  geom_histogram(bins = 50, fill = "#FF4500", color = "grey2", alpha = 0.8) + 
+  # Minimal arrows pointing at the histogram bars
+  geom_segment(
+    data = city_data,
+    aes(x = gdp, xend = gdp, 
+        y = 1000, yend = 50),  # Adjust yend to match bar height
+    color = "black",
+    arrow = arrow(length = unit(0.1, "cm"), type = "closed"),
+    linewidth = 0.4
+  ) +
+  # Small labels next to arrows
+  geom_text(
+    data = city_data,
+    aes(x = gdp, y = 1050, label = city_label),  # Just above arrow
+    size = 2.5,
+    vjust = 0,
+    hjust = 0.5
+  ) +
+  theme_minimal() +
+  labs(x = "Declared income")
+
+df.comuni[order(-df.comuni$gdp), ]
+```
+
+ 
+```{r}
+ggplot(df.comuni, aes(x = gdp)) +
+  geom_histogram(bins = 50, fill = "#FF4500", color = "grey2", alpha = 0.8) + 
+  theme_minimal() +
+  labs( x = "log(Declared income)") 
+
+ggplot(df.comuni, aes(x = log(gdp))) +
+  geom_histogram(bins = 50, fill = "#FF4500", color = "grey2", alpha = 0.8) + 
+  theme_minimal() +
+  labs( x = "log(Declared income)") 
+
+df.province %>%
+  filter(year == 2020) %>%
+  ggplot(aes(x = gdp)) +
+  geom_histogram(bins = 20, fill = "#FF4500", color = "grey2", alpha = 0.8) + 
+  theme_minimal() +
+  labs(x = "GDP")
+
+df.province %>%
+  filter(year == 2020) %>%
+  ggplot(aes(x = log(gdp))) +
+  geom_histogram(bins = 20, fill = "#FF4500", color = "grey2", alpha = 0.8) + 
+  theme_minimal() +
+  labs(x = "GDP")
+
+```
+
+
+```{r}
+# Provincial level faceted by year
+df.province %>%
+  ggplot() +
+  geom_sf(aes(fill = ntl_mean), linewidth = 0.2) +
+  scale_fill_viridis_c(
+    option = "cividis",
+    name = "NTL Radiance",
+    na.value = "grey90"
+  ) +
+  facet_wrap(~ year, ncol = 4) +  # Adjust ncol as needed
+  theme_void()
+```
+
+
+# Model Visualization
+
+### Comuni
+
+```{r}
+# Model
+
+model1 = gdp ~ 1 + 
+  ntl_mean +
+  f(S, model="besag", graph=gdp.inla.graph.comuni) +
+  f(regione, model="besag", graph = gdp.inla.graph.region, constr=TRUE)
+
+fit3 <- inla(
+    model1,
+    family = "gamma",
+    data = df.comuni,
+    control.compute = list(dic = TRUE, cpo = TRUE, waic = TRUE),
+    verbose = FALSE,
+    control.predictor = list(compute = TRUE)
+  )
+```
+
+
+```{r}
+df.comuni$spatial_effect = fit3$summary.random$S$mean
+# df.comuni$spatial_effect1 = fit3$summary.random$regione$mean
+df.comuni <- left_join(df.comuni, 
+                      fit3$summary.random$regione %>% select(ID, mean),
+                      by = c("regione" = "ID")) 
+df.comuni <- df.comuni %>%
+  rename(regione_effect = mean)
+
+df.comuni$uncertainty_spatial = fit3$summary.random$S$sd
+
+
+
+p1 = ggplot(df.comuni) +
+  geom_sf(aes(fill = spatial_effect), color = NA) + # color=NA removes borders
+  scale_fill_viridis(
+    name = "Spatial Effect",
+    option = "viridis",
+    alpha = 0.9
+  ) +
+  theme_void()
+
+p1 = ggplot(df.comuni) +
+  geom_sf(aes(fill = spatial_effect), color = NA) +
+  scale_fill_gradient2(
+    name = "Spatial Effect",
+    low = "blue2",        # Negative values
+    mid = "white",       # Zero point
+    high = "red2",        # Positive values
+    midpoint = 0,        # Center at zero
+    na.value = "grey50"
+  ) +
+  theme_void()
+
+# table(df.comuni$regione_effect)
+# table(df.comuni$NAME_1)
+
+p2 = ggplot(df.comuni) +
+  geom_sf(aes(fill = regione_effect), color = NA) + # color=NA removes borders
+  scale_fill_gradient2(
+    name = "Spatial Effect",
+    low = "blue2",        # Negative values
+    mid = "white",       # Zero point
+    high = "red2",        # Positive values
+    midpoint = 0,        # Center at zero
+    na.value = "grey50"
+  ) +
+  theme_void()
+
+p1 + p2
+```
+
+# Province
+
+```{r}
+model.prov.final = gdp ~ 1 + ntl_mean +
+  f(regione, model = "iid") +
+  f(name1, model="besag", graph = gdp.inla.graph1) +
+  f(year, model = "rw1")
+
+fit.pro4 <- inla(
+    model.prov.final,
+    family = "gamma",
+    data = df.province,
+    control.compute = list(dic = TRUE, cpo = TRUE, waic = TRUE),
+    verbose = FALSE 
+  )
+```
+
+```{r}
+# Get the list of years
+years <- unique(df.province$year)
+
+# Create a list to store plots
+plot_list <- list()
+
+for (i in seq_along(years)) {
+  # Subset data for the year
+  data_year <- df.province[df.province$year == years[i], ]
+  
+  # Create the plot for the year
+  p <- ggplot(data_year) +
+    geom_sf(aes(fill = gdp)) +
+    scale_fill_viridis_c(option = "plasma", name = "GDP", guide = "none") +
+    ggtitle(paste(years[i])) +
+    theme_void()
+  
+  # Save the plot in the list
+  plot_list[[i]] <- p
+}
+
+print(plot_list[[1]])
+wrap_plots(plot_list, ncol = 3)
+```
+
+
+```{r}
+# Extract temporal effects
+temporal_effects <- fit.pro4$summary.random$year
+table(df.province$NAME_1)
+table(df.province$regione)
+
+# Plot temporal trend
+pp1 = ggplot(temporal_effects, aes(x = ID, y = mean)) +
+  geom_line(linewidth = 0.8, color = "steelblue") +
+  geom_ribbon(aes(ymin = `0.025quant`, ymax = `0.975quant`), 
+              alpha = 0.3, fill = "steelblue") +
+  geom_point(color = "darkblue") +
+  labs( y = '', x = "Year") +
+  theme_minimal()
+
+# Extract province effects
+df.province$province_effects <- result2$summary.random$province$mean
+
+```
+
+```{r}
+# Extract region effects
+region_effects <- fit.pro4$summary.random$region
+
+# Bar plot for each region ID
+pp2 = ggplot(region_effects, aes(x = ID, y = mean)) +
+  geom_col(aes(fill = mean), width = 0.7) +
+  geom_errorbar(aes(ymin = `0.025quant`, ymax = `0.975quant`), 
+                width = 0.2, color = "gray30") +
+    labs( y = '', x = "Region") +
+  theme_minimal()
+
+pp2 = ggplot(region_effects, aes(x = ID, y = mean)) +
+  geom_col(aes(fill = mean), width = 0.7) +
+  geom_errorbar(aes(ymin = `0.025quant`, ymax = `0.975quant`), 
+                width = 0.2, color = "gray30") +
+  labs(y = '', x = "Region") +
+  theme_minimal() +
+  scale_fill_gradient2(
+    name = "Intercept Effect",
+    low = "blue2",        # Negative values
+    mid = "white",       # Zero point
+    high = "red2",        # Positive values
+    midpoint = 0,        # Center at zero
+    na.value = "grey50"
+  )
+
+pp1 + pp2
+```
+
+```{r}
+
+# Get unique province geometries and names
+province_geometries <- df.province %>%
+  distinct(name, .keep_all = TRUE) %>%
+  select(name, geometry)
+
+province_geometries$spatial.prov <- fit.pro4$summary.random$name1$mean
+
+
+ggplot(province_geometries) +
+  geom_sf(aes(fill = spatial.prov), color = NA) +
+  scale_fill_gradient2(
+    name = "Spatial Effect",
+    low = "blue2",        # Negative values
+    mid = "white",       # Zero point
+    high = "red2",        # Positive values
+    midpoint = 0,        # Center at zero
+    na.value = "grey50"
+  ) +
+  theme_void()
+```

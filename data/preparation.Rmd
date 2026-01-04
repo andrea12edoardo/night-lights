@@ -1,0 +1,439 @@
+---
+title: "Data Preparation"
+author: "Andrea Sciortino"
+date: "2025-07-25"
+output: html_document
+---
+
+# Response Variable and Covariates Preparation
+
+This document describes the data preparation steps for the spatial areal response variable preparation, encompassed for provinces and municipalities in Italy.
+
+```{r warning=TRUE, include=FALSE}
+library(readr)
+library(tibble)
+library(blackmarbler)
+library(geodata)
+library(sf)
+library(terra)
+library(ggplot2)
+library(tidyterra)
+library(lubridate)
+library(readr)
+library(dplyr)
+library(spdep)
+library(INLA)
+
+normalize_names <- function(x) {
+  x <- tolower(iconv(x, to = "ASCII//TRANSLIT")) # remove accents, lower case
+  x <- gsub("\\s+", " ", x)      # normalize whitespace
+  x <- trimws(x)                 # remove leading/trailing whitespace
+  return(x)
+}
+
+aggregate_sardegna <- function(df) {
+  extra_sardegna <- c("sassari", "nuoro", "cagliari", "oristano", "sud sardegna")
+  
+  sardegna_union <- df %>%
+    filter(name %in% extra_sardegna) %>%
+    summarize(
+      Territory = "Sardegna-Aggregated",
+      Observation = mean(Observation, na.rm = TRUE),
+      name = "sardegna"
+    )
+  
+  other_provinces <- df %>%
+    filter(!name %in% extra_sardegna)
+  
+  result <- bind_rows(other_provinces, sardegna_union)
+  return(result)
+}
+
+enhanced_normalize_names <- function(x) {
+  x <- tolower(iconv(x, to = "ASCII//TRANSLIT")) # remove accents, lower case
+  x <- gsub("[.,]", "", x)                       # remove periods and commas
+  x <- gsub("\\s*['`]\\s*", " ", x)              # normalize apostrophes and spacing
+  x <- gsub("\\s+", " ", x)                      # normalize whitespace
+  x <- gsub("^\\s+|\\s+$", "", x)                # remove leading/trailing whitespace
+  x <- gsub("\\s*\\([^)]*\\)", "", x)            # remove content in parentheses
+  x <- gsub("\\s*-\\s*", " ", x)                 # normalize hyphens
+  x <- gsub("\\s+", "", x)                       # REMOVE ALL SPACES
+  return(x)
+}
+```
+
+# Provinces
+
+### GDP
+
+Down-scaled global gross domestic product (GDP) per capital database by  PPP over 1990–2022 from https://www.nature.com/articles/s41597-025-04487-x is available in website as .csv-file. Once imported we will notice that the total number of provinces is 110.
+
+
+```{r include=FALSE}
+#       Load data:
+
+provinces = gadm(country = "ITA", level = 2, path = tempdir()) |> st_as_sf() |>
+  select(NAME_2, geometry)
+
+provinces$name  <- normalize_names(provinces$NAME_2)
+provinces = provinces %>%
+  mutate(
+    name = case_when(
+      name == "monza and brianza" ~ "monza e della brianza",
+      name == "padua" ~ "padova",
+      name == "florence" ~ "firenze",
+      name == "mantua" ~ "mantova",
+      name == "syracuse" ~ "siracusa",
+      TRUE ~ name
+    )
+  )
+
+#       Load data:
+
+setwd("~/Desktop/TESI/Night Lights")
+tabulated_adm2_gdp_perCapita <- read_csv("tabulated_adm2_gdp_perCapita.csv")
+italia = tabulated_adm2_gdp_perCapita[tabulated_adm2_gdp_perCapita$iso3 == "ITA", ] # select Italy
+italia_gdp = italia[!is.na(italia$NAME_2), ] # omitt NA
+
+# Select all years:
+ita_gdp = italia_gdp %>%
+  select(-adm2ID, -slope, -iso3)
+
+gdp.prov <- ita_gdp %>%
+  mutate(
+    NAME_2 = case_when(
+      NAME_2 == "Aosta Valley" ~ "Aosta",
+      NAME_2 == "Bolzano-Bozen" ~ "Bolzano",
+      NAME_2 == "Florence" ~ "Firenze",
+      NAME_2 == "Forlì-Cesena" ~ "Forli' - Cesena",
+      NAME_2 == "ForlÔøΩ-Cesena" ~ "Forli' - Cesena", # Handling encoding issue
+      NAME_2 == "Genoa" ~ "Genova",
+      NAME_2 == "Mantua" ~ "Mantova",
+      NAME_2 == "Massa-Carrara" ~ "Massa Carrara",
+      NAME_2 == "Milan" ~ "Milano",
+      NAME_2 == "Naples" ~ "Napoli",
+      NAME_2 == "Padua" ~ "Padova",
+      NAME_2 == "Rome" ~ "Roma",
+      NAME_2 == "Turin" ~ "Torino",
+      NAME_2 == "Venice" ~ "Venezia",
+      NAME_2 == "Padua" ~ "Padova",
+      NAME_2 == "Florence" ~ "Firenze",
+      NAME_2 == "Mantua" ~ "Mantova",
+      NAME_2 == "Monza and Brianza" ~ "Monza e della Brianza",
+      NAME_2 == "Syracuse" ~ "Siracusa",
+      
+      TRUE ~ NAME_2
+    )
+  )
+gdp.prov$name  <- normalize_names(gdp.prov$NAME_2)
+
+```
+
+```{r eval=FALSE, include=FALSE}
+#       Check
+
+tibble(provinces)
+plot(roi_sf, col = NA, border = "black")
+str(provinces)
+st_crs(provinces)
+
+#       Bounding box of the region:
+
+cat('Bounding Box: \n \n')
+st_bbox(provinces)
+```
+
+### Aggregate Sardinia
+
+**Attenzione**
+
+> ["cagliari","carbonia-iglesias" "medio campidano","nuoro","ogliastra","olbia-tempio","oristano","sassari"]
+
+After the 2016 there were modification of some provinces. Beside that our gdp data-frame have some missing value for the Sardegna region, its provinces will be aggregated thought a mean value. This mean that our provinces at the end are 103.
+
+```{r}
+setdiff(provinces$name, gdp.prov$name)
+setdiff(gdp.prov$name, provinces$name)
+
+#       'sardinia' adjustment fro roi_sf
+sard_names <- c("cagliari", "carbonia-iglesias", "medio campidano", 
+                "nuoro", "ogliastra", "olbia-tempio", "oristano", "sassari")
+
+# select and unioin sardinia
+sardinia_sf = provinces %>% filter(name %in% sard_names)
+sardinia_union = st_union(sardinia_sf)
+sardinia_row = st_sf(
+  name = "sardegna",
+  geometry = sardinia_union
+)
+other_provinces = provinces %>% filter(!name %in% sard_names)
+provinces.new = bind_rows(other_provinces, sardinia_row)
+
+
+gdp.prov$name[gdp.prov$name == "sardinia"] <- "sardegna"
+gdp.prov.new = gdp.prov |> distinct()
+
+### CHECK
+# setdiff(provinces$name, gdp.prov.new$name) 
+# setdiff(gdp.prov.new$name, provinces$name)
+
+# setdiff(provinces.new$name, gdp.prov.new$name) 
+# setdiff(gdp.prov.new$name, provinces.new$name)
+
+nrow(provinces.new)
+nrow(gdp.prov.new)
+```
+
+
+```{r}
+tibble(provinces.new)
+tibble(gdp.prov.new)
+
+str(provinces.new)
+str(gdp.prov.new)
+
+data.provinces <- inner_join(gdp.prov.new, provinces.new, by = "name")
+nrow(data.provinces)
+str(data.provinces)
+```
+
+### Save data
+
+```{r}
+saveRDS(data.provinces, "/Users/") 
+```
+
+## Neighborhood Structure
+
+```{r}
+str(data.provinces)
+nb0 = poly2nb(data.provinces, snap = 20) 
+
+plot(st_geometry(data.provinces), col = "white", border = "grey")
+
+centroids <- st_centroid(data.provinces)
+centroid_coords <- st_coordinates(centroids)
+
+plot(nb0, st_coordinates(st_centroid(data.provinces)), col = "blue", add = TRUE)
+```
+
+
+## Covariates Data ISTAT
+
+https://esploradati.istat.it/databrowser/#/en/dw/categories/IT1,Z0930TER,1.0/BES_T
+
+This ISTAT data-set provides annual indicators at the province level for Italy, enabling detailed socio-economic and educational analysis by territory and time period. 
+
+```{r}
+upper.second.data = read_csv("~/Desktop/night-lights/Education and training (IT1,DF_BES_TERRIT_2,1.0).csv")
+population = read_csv("~/Desktop/night-lights/Popolazione residente.csv")
+employment = read_csv("~/Desktop/night-lights/Work and life balance (IT1,DF_BES_TERRIT_3,1.0).csv")
+
+str(population)
+str(upper.second.data)
+str(employment)
+
+population.2025 = population |>
+  select(Provincia, Totale)
+
+upper.2024 = upper.second.data %>% 
+  filter(TIME_PERIOD == '2024') |> # from 2018-2024
+  select(Territory, Observation)
+
+employment.2024 = employment %>% 
+  filter(TIME_PERIOD == '2024') |> # from 2018-2024
+  select(Territory, Observation)
+```
+
+
+```{r}
+extra = c( "italy", "nord", "nord-ovest", "piemonte", "liguria", 
+           "lombardia", "nord-est", "trentino alto adige / s\"udtirol", 
+           "veneto", "friuli-venezia giulia", "emilia-romagna", "centro (i)", 
+           "toscana", "umbria", "marche", "lazio", "mezzogiorno",
+           "sud", "abruzzo", "molise", "campania", "puglia", "basilicata", 
+           "calabria", "isole", "sicilia", "sardegna")
+
+#       Population:
+population.2025$name = normalize_names(population.2025$Provincia)
+
+population.2025 = population.2025 |>
+  mutate(
+    name = case_when(
+      name == "'reggio nell\"'emilia'" ~ "reggio nell'emilia",
+      name == "forl`i-cesena" ~ "forli' - cesena",
+      name == "'l\"'aquila'" ~ "l'aquila",
+      name == "bolzano/bozen" ~ "bolzano",
+      name == "valle d'aosta/vall'ee d'aoste" ~ "aosta",
+      name == "massa-carrara" ~ "massa carrara",
+      TRUE ~ name
+    )
+  ) |>
+  filter(!name %in% extra) |>
+  rename(Territory = Provincia, Observation = Totale)
+
+#       Education:
+upper.2024$name = normalize_names(upper.2024$Territory)
+
+upper.2024 = upper.2024 %>%
+  mutate(
+    name = case_when(
+      name == "'reggio nell\"'emilia'" ~ "reggio nell'emilia",
+      name == "forl`i-cesena" ~ "forli' - cesena",
+      name == "'l\"'aquila'" ~ "l'aquila",
+      name == "bolzano / bozen" ~ "bolzano",
+      name == "'valle d\"'aosta / vall'ee d\"'aoste'" ~ "aosta",
+      name == "massa-carrara" ~ "massa carrara",
+      TRUE ~ name
+    )
+  ) |>
+  filter(!name %in% extra) %>% 
+  distinct()
+
+#       Employment:
+employment.2024$name = normalize_names(employment.2024$Territory)
+
+employment.2024 = employment.2024 %>%
+  mutate(
+    name = case_when(
+      name == "'reggio nell\"'emilia'" ~ "reggio nell'emilia",
+      name == "forl`i-cesena" ~ "forli' - cesena",
+      name == "'l\"'aquila'" ~ "l'aquila",
+      name == "bolzano / bozen" ~ "bolzano",
+      name == "'valle d\"'aosta / vall'ee d\"'aoste'" ~ "aosta",
+      name == "massa-carrara" ~ "massa carrara",
+      TRUE ~ name
+    )
+  ) |>
+  filter(!name %in% extra) %>% 
+  distinct()
+
+
+setdiff(data.provinces$name, population.2025$name)
+setdiff(population.2025$name, data.provinces$name)
+
+setdiff(data.provinces$name, upper.2024$name)
+setdiff(upper.2024$name, data.provinces$name)
+
+setdiff(data.provinces$name, employment.2024$name)
+setdiff(employment.2024$name, data.provinces$name)
+
+nrow(population.2025)
+nrow(upper.2024)
+nrow(employment.2024)
+```
+
+```{r}
+population.2025.correct = aggregate_sardegna(population.2025)
+upper.2024.correct = aggregate_sardegna(upper.2024)
+employment.2024.correct = aggregate_sardegna(employment.2024)
+
+nrow(population.2025.correct)
+nrow(upper.2024.correct)
+nrow(employment.2024.correct)
+```
+
+```{r}
+istat.data.2024 <- population.2025.correct |>
+  full_join(upper.2024.correct, by = "name") |>
+  full_join(employment.2024.correct, by = "name") %>%
+  rename(
+    populations = Observation.x,
+    educations = Observation.y,
+    employments = Observation
+  ) %>%
+  select(name, populations, educations, employments)
+
+# Check
+setdiff(data.provinces$name, istat.data.2024$name)
+setdiff(istat.data.2024$name, data.provinces$name)
+
+# Joint with the sf object
+gdp.istat.prov.2024 <- inner_join(data.provinces, istat.data.2024, by = "name")
+nrow(gdp.istat.prov.2024)
+str(gdp.istat.prov.2024)
+
+```
+
+### Save data
+
+```{r}
+saveRDS(province_data)
+```
+
+# Comuni
+
+## Declared income based on tax return fro IRPEF
+
+```{r eval=FALSE, include=FALSE}
+comuni = gadm(country = "ITA", level = 3, path = tempdir()) |>
+  st_as_sf() |>
+  select(NAME_3, NAME_1, NAME_2, geometry) |>
+  mutate(
+    NAME_1 = case_when(
+      NAME_1 == "Apulia" ~ "Puglia",
+      NAME_1 == "Sicily" ~ "Sicilia",
+      TRUE ~ NAME_1))
+
+data.comuni.2023 <- readxl::read_xlsx("~/Redditi_e_principali_variabili_IRPEF_su_base_comunale_CSV_2023 2.xlsx") |> 
+  select("Denominazione Comune", Regione, "Reddito complessivo - Ammontare in euro")  |>
+  rename(NAME_3 = "Denominazione Comune") |> 
+  mutate(NAME_3 = stringr::str_split_i(NAME_3, " \\.", 1)) |> # Correction of bilingual issue 
+  mutate(
+    Regione = case_when(
+      Regione == "Trentino Alto Adige(P.A.Bolzano)" ~ "Trentino-Alto Adige",
+      Regione == "Trentino Alto Adige(P.A.Trento)" ~ "Trentino-Alto Adige",
+      Regione == "Emilia Romagna" ~ "Emilia-Romagna",
+      Regione == "Friuli Venezia Giulia" ~ "Friuli-Venezia Giulia",
+      TRUE ~ Regione
+    )
+  )
+
+ntl = ntl_comuni |> 
+  select(NAME_3, NAME_1, ntl_mean) |>
+  mutate(
+    NAME_1 = case_when(
+      NAME_1 == "Apulia" ~ "Puglia",
+      NAME_1 == "Sicily" ~ "Sicilia",
+      TRUE ~ NAME_1))
+
+#       Correction:
+
+data = comuni |>
+  left_join(ntl, by = c("NAME_3", "NAME_1"="NAME_1")) |>
+  select(NAME_3, NAME_1, NAME_2, ntl_mean, geometry) |> distinct() |>
+  mutate(NAME_3 = toupper(NAME_3)) |>
+  st_as_sf()
+
+data.comuni.2023$name_clean  <- enhanced_normalize_names(data.comuni.2023$NAME_3)
+data$name_clean  <- enhanced_normalize_names(data$NAME_3)
+
+#       Join:
+
+data.comuni.2023 <- data.comuni.2023 %>%
+  mutate(
+    name_clean = case_when(
+      name_clean == "fieradiprimiero" ~ "primierosanmartinodicastrozza",
+      name_clean == "albissolamarina" ~ "albisolamarina",
+      name_clean == "vermezzo" ~ "vermezzoconzelo",
+      name_clean == "sanvalentinoinabruzzociterio" ~ "sanvalentinoinabruzzociteriore",
+      name_clean == "iesolo" ~ "jesolo",
+      name_clean == "verderioinferiore" ~ "verderio",
+      name_clean == "uggiatetrevano" ~ "uggiateconronago",
+      name_clean == "casolebruzio" ~ "casalidelmanco",
+      name_clean == "santangeloinlizzola" ~ "vallefoglia",
+      TRUE ~ name_clean
+    )
+  )
+
+df.comuni.2023 = left_join(data, data.comuni.2023, by = "name_clean") |> 
+  distinct() |>                 # Remove duplicate rows based on all columns
+  filter(if_all(everything(), ~ !is.na(.))) |># Remove rows with any NA in any column
+  rename(gdp = "Reddito complessivo - Ammontare in euro") |>
+  select(NAME_3.x, gdp, ntl_mean, NAME_1, NAME_2)
+```
+
+```{r}
+saveRDS(comuni_data)
+```
+

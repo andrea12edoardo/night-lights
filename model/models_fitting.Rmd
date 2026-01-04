@@ -1,0 +1,346 @@
+---
+title: "INLA Modelling"
+author: "Andrea Sciortino"
+date: "2025-09-13"
+output: html_document
+---
+
+```{r}
+library(readr)
+library(tibble)
+library(blackmarbler)
+library(geodata)
+library(sf)
+library(terra)
+library(ggplot2)
+library(tidyterra)
+library(lubridate)
+library(readr)
+library(dplyr)
+library(spdep)
+library(INLA)
+# install.packages('INLA')
+
+### Helper Functions
+
+fit_inla_model <- function(formula, data, adjacency) {
+  # formula: R formula for the linear predictor
+  # data: data.frame containing response and covariates
+  # adjacency: adjacency matrix or graph file for spatial random effect
+  
+  result <- inla(
+    formula,
+    family = "gaussian",
+    data = data,
+    control.compute = list(dic = TRUE, cpo = TRUE, waic = TRUE),
+    verbose = FALSE,
+    control.family = list(link = "identity"),
+    control.predictor = list(compute = TRUE)
+  )
+  
+  return(result)
+}
+
+normalize_names <- function(x) {
+  x <- tolower(iconv(x, to = "ASCII//TRANSLIT")) # remove accents, lower case
+  x <- gsub("\\s+", " ", x)      # normalize whitespace
+  x <- trimws(x)                 # remove leading/trailing whitespace
+  return(x)
+}
+```
+
+```{r}
+data.prov <- readRDS("~/Desktop/night-lights/provinces_data_tesi.rds")
+data.prov = data.prov |>
+  select(-NAME_2.x, -GID_2, -NAME_2.y)
+
+tibble(data.prov)
+
+```
+
+# Data
+
+<https://arxiv.org/html/2509.01604v1>
+
+The provincial gdp data-frame contains data of province represented as unit, collected from 1990 to 2022. A real-word pattern explicated by the primary geography law of **Tobler’s First Law of Geography**, which states:
+
+> **“Everything is related to everything else, but near things are more related than distant things.**
+
+suggest that a spacial structure could be additional descriptive information of the distribution geographical units.To implement this investigation thought a statistical framework, first we analyze the spacial structure for a fixed year and then generalize to a spatio-temporal analysis.
+
+Strating with the conversion of the provinces sf-file in a neighborhood structure that account for adjacency between units.
+
+Once the adjacency matrix is constructed we can retrieve a graph, with its vertex $V(n)$ and edges $E(gdp.graph)$, witch can be used in the study of the network i.e the matrix is a $n \times n$ ( $n$ is the number of provinces ) and Milan can be thought as row/column of 1's for the provinces of ... that are the first nearest neighbors and 0's for all other.In this study we will consider only the first neighbors as our parameter is set at `snap=20`, in the visualization represented by the circle around the centroids of the province, it can be increase and create edges between second or third neighbors.
+
+## Fixed Year Spacial Model
+
+$$
+Y_i = \beta_0 + \beta_1 X_i + u_i + v_i
+$$
+
+-   $Y_i$ :
+
+-   $X_i$ :
+
+-   $\beta_0$ :
+
+-   $\beta_1$:
+
+-   $v_i$ :
+
+-   $u_i$ :
+
+HOW TO SELECT YEAR?
+
+We can assume that there could be a variability derived from the temporal snapshot, so for the moment the starting point we'll be the 2020 as reference year. In the next section adding a variability source error derived from time series, we'll be able to account for all years information.
+
+```{r}
+#       Load data:
+gdp.istat.prov.2024 = readRDS("~/Desktop/night-lights/data/gdp.istat.prov.2024.rds")
+nightlight_2012_2022 = read_csv("nightlight.2012.2022.csv")
+
+#       Correct for Sardegna:
+night.2022 <- nightlight_2012_2022 %>%
+  filter(date == '2022') %>%
+  select(NAME_2, NAME_1, ntl_mean)
+
+night.2022$name = normalize_names(night.2022$NAME_2)
+sard_names = c("cagliari", "carbonia-iglesias", "medio campidano", 
+                "nuoro", "ogliastra", "olbia-tempio", "oristano", "sassari")
+sardegna_union = night.2022 %>%
+  filter(name %in% sard_names) %>% # select sardegna provinces
+  summarize(
+    NAME_2 = "Sardegna-Aggregated", 
+    ntl_mean = mean(ntl_mean, na.rm = TRUE),   # select mean value
+    NAME_1 = "Sardegna",
+    name = "sardegna"
+  )
+other_provinces = night.2022 %>%
+  filter(!name %in% sard_names)
+night.2022.new = bind_rows(other_provinces, sardegna_union)
+
+night.2022.new = night.2022.new %>%
+  mutate(
+    name = case_when(
+      name == "monza and brianza" ~ "monza e della brianza",
+      name == "padua" ~ "padova",
+      name == "florence" ~ "firenze",
+      name == "mantua" ~ "mantova",
+      name == "syracuse" ~ "siracusa",
+      TRUE ~ name
+    )
+  )
+
+#       Join:
+
+df <- gdp.istat.prov.2024 %>%
+  full_join(night.2022.new, by = "name") |> 
+  select(name, '2022', populations, educations, employments, ntl_mean, geometry, NAME_2.x) |>
+  st_as_sf()
+
+results = df |>
+  select(name,geometry)
+```
+
+```{r}
+nb = poly2nb(df, snap = 15)
+nb2INLA("gdp.graph", nb)         # creates the file for INLA usage
+gdp.inla.graph <- "gdp.graph"    # the filename for the graph
+
+df.prov = df |> 
+  mutate(U = 1:n(), S = 1:n()) |>
+  rename(gdp = '2022')
+```
+
+# Correlation Matrix
+
+```{r}
+covariates <- df.prov %>%
+  st_drop_geometry() %>%
+  select(populations, educations, employments, ntl_mean)
+
+cor(covariates)
+```
+
+# Models
+
+```{r}
+# Normal-scale
+model1 = gdp ~ 1 + f(U, model='iid') + f(S, model="besag", graph=gdp.inla.graph)
+
+# Logaritmic-scale
+model2 = log(gdp) ~ 1 +
+  f(U, model='iid') + f(S, model="besag", graph=gdp.inla.graph)
+
+# Logaritmic-scale + night-light
+model3 = log(gdp) ~ 1 + ntl_mean +
+  f(U, model='iid') + f(S, model="besag", graph=gdp.inla.graph)
+
+# Logaritmic-scale + log(night-light)
+model4 = log(gdp) ~ 1 + log(ntl_mean) +
+  f(U, model='iid') + f(S, model="besag", graph=gdp.inla.graph)
+
+# Logaritmic-scale + log(night-light) + educations
+model5 = log(gdp) ~ 1 + log(ntl_mean) + educations +
+  f(U, model='iid') + f(S, model="besag", graph=gdp.inla.graph)
+
+# Logaritmic-scale + log(night-light) + employment
+model6 = log(gdp) ~ 1 + log(ntl_mean) + employments +
+  f(U, model='iid') + f(S, model="besag", graph=gdp.inla.graph)
+
+# Logaritmic-scale + log(night-light) + population
+model7 = log(gdp) ~ 1 + log(ntl_mean) + populations +
+  f(U, model='iid') + f(S, model="besag", graph=gdp.inla.graph)
+
+# Logaritmic-scale + log(night-light) + population + education
+model8 = log(gdp) ~ 1 + log(ntl_mean) + populations + employments +
+  f(U, model='iid') + f(S, model="besag", graph=gdp.inla.graph)
+
+
+fit1 = fit_inla_model(model1, df.prov, gdp.inla.graph)
+fit2 = fit_inla_model(model2, df.prov, gdp.inla.graph)
+fit3 = fit_inla_model(model3, df.prov, gdp.inla.graph)
+fit4 = fit_inla_model(model4, df.prov, gdp.inla.graph)
+fit5 = fit_inla_model(model5, df.prov, gdp.inla.graph)
+fit6 = fit_inla_model(model6, df.prov, gdp.inla.graph)
+fit7 = fit_inla_model(model7, df.prov, gdp.inla.graph)
+fit8 = fit_inla_model(model8, df.prov, gdp.inla.graph)
+```
+
+## Results
+
+```{r}
+summary(fit1)
+```
+
+```{r}
+summary(fit2)
+```
+
+```{r}
+summary(fit3)
+```
+
+```{r}
+summary(fit4)
+```
+
+```{r}
+summary(fit5)
+```
+
+```{r}
+summary(fit6)
+```
+
+```{r}
+summary(fit7)
+```
+
+```{r}
+summary(fit8)
+```
+
+```{r}
+# Extract model scores
+model_names <- paste0("fit", 1:8)
+results <- lapply(model_names, function(m) {
+  fit <- get(m)
+  s <- summary(fit)
+  data.frame(
+    Model = m,
+    DIC   = s$dic$dic,
+    WAIC  = s$waic$waic,
+    CPO   = sum(-log(s$cpo$cpo), na.rm = TRUE),  # sum of negative log-CPO
+    MLIK  = s$mlik[1,1],
+    stringsAsFactors = FALSE    # <<--- Prevents factor conversion
+  )
+})
+
+# Combine tables
+model_comparison <- do.call(rbind, results)
+
+options(scipen = 999)  # strongly discourage scientific notation
+print(model_comparison)
+
+
+write.csv(model_comparison, file = "output_table.csv")
+read.csv("output_table.csv")
+```
+# Visualization
+
+```{r}
+library(sp)
+library(sf)
+library(ggplot2)
+library(RColorBrewer)
+
+
+province_names <- df.prov$name
+spatial_summary$name <- province_names[spatial_summary$ID]
+
+library(dplyr)
+df.prov <- df.prov %>%
+  left_join(spatial_summary %>% select(name, mean), by = "name")
+
+library(ggplot2)
+ggplot(df.prov) +
+  geom_sf(aes(fill = mean)) +
+  scale_fill_distiller(palette = "YlOrRd", direction = 1) +
+  labs(title = "Posterior mean (Besag effect) by province")
+
+ggplot(df.prov) +
+  geom_sf(aes(fill = gdp)) +
+  scale_fill_distiller(palette = "YlOrRd", direction = 1) +
+  labs(title = "GDP distribution")
+
+```
+
+
+```{r}
+library(INLA)
+library(sf)
+
+# Assuming model8 is the fitted INLA object:
+spatial_effect <- fit8$summary.random$S
+random_effect <- fit8$summary.random$U
+
+# Prepare spatial data with random effect means
+# Should have the spatial polygons or points corresponding to S regions
+df.prov$random_effect <- spatial_effect$mean
+df.prov$random_effect2 <- random_effect$mean
+
+# Plot spatially using sf plot or tmap:
+plot(df.prov["random_effect"])
+plot(df.prov["random_effect2"])
+
+```
+
+
+```{r}
+
+for(i in seq_along(fit8$marginals.fixed)) {
+  plot(fit8$marginals.fixed[[i]], type="l", main=names(fit8$marginals.fixed)[i])
+}
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

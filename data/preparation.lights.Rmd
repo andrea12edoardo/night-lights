@@ -1,0 +1,223 @@
+---
+title: "Nighttime Lights"
+author: "Andrea Sciortino"
+date: "2025-09-13"
+output: html_document
+---
+
+# Spatial Statistics Data Preparation for Nighttime Lights in Italy
+
+## Areal Data Preparation
+
+Need to define the geographical domain with proper object and the we can retrieve both the raster of the total nighttime light emission caputred across the surface. We need the mean value across all the pixel enclosed by the administrative boundary of the region of interest.
+
+```{r}
+library(ggplot2)
+library(tidyterra)
+library(tibble)
+library(blackmarbler)
+library(geodata)
+library(sf)
+library(terra)
+library(readr)
+library(dplyr)
+source("~/Desktop/night-lights/tokens.R")
+
+normalize_names <- function(x) {
+  x <- tolower(iconv(x, to = "ASCII//TRANSLIT")) # remove accents, lower case
+  x <- gsub("\\s+", " ", x)      # normalize whitespace
+  x <- trimws(x)                 # remove leading/trailing whitespace
+  return(x)
+}
+```
+
+# Province Data
+
+Define the geographical domain with a `sf` object, then the location for the areal data
+
+```{r}
+# DATA PREPARATION - Nighttime Lights Italy
+# Technical: NASA Black Marble VIIRS VNP46A4 annual product
+# Spatial resolution: ~500m, Temporal coverage: 2012-present
+
+# 1. ADMINISTRATIVE BOUNDARIES
+italia <- gadm("ITA", 1, path=tempdir())        # Regions (NUTS2)
+provinces <- gadm("ITA", 2, path=tempdir())     # Provinces (NUTS3)
+comuni <- gadm("ITA", 3, path=tempdir())        # Municipalities (LAU)
+
+# 2. NIGHTTIME LIGHTS EXTRACTION
+# Annual mean radiance (nW/cm²/sr) extraction using blackmarbler
+# Note: Requires NASA Earthdata bearer token
+ntl_province = bm_extract(
+  roi_sf = provinces,
+  product_id = "VNP46A4",      # Annual VIIRS product
+  date = 2012:2022,            # Time series
+  bearer = bearer,             
+  stats = "mean"               # Aggregation statistic
+)
+```
+
+### Trends over time
+
+Analyses of time series data aggregated over spatial regions (areal data) need to model both temporal dynamics and spatial dependence, as ignoring spatial context can lead to biased inference and imprecise predictions
+
+```{r}
+str(ntl_df)
+summary(ntl_df)
+# table(ntl_df$NAME_1)
+
+ggplot(ntl_df, aes(x = date, y = ntl_mean, color = NAME_2)) +
+  geom_line() + 
+  labs(title = "Annual Mean Nighttime Lights by Province and Region",
+       x = "Year", y = "NTL Mean") +
+  theme_minimal() +
+  
+  theme(legend.position = "none")
+```
+
+
+## Visualization
+
+```{r}
+#### Make raster
+raster = bm_raster(roi_sf = italia,
+               product_id = "VNP46A4",
+               date = 2023,
+               bearer = bearer)
+
+r = raster |> terra::mask(italia)
+
+## Distribution is skewed, so log
+r[] = log(r[] + 1)
+
+##### Map
+ggplot() +
+  geom_spatraster(data = r) +
+  scale_fill_gradient2(low = "black",
+                       mid = "yellow",
+                       high = "red",
+                       midpoint = 4.5,
+                       na.value = "transparent") +
+  coord_sf() +
+  theme_void() +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5),
+  legend.position = "none")
+```
+
+```{r}
+ntl_2022 <- bm_extract(
+  roi_sf = provinces,
+  product_id = "VNP46A4",   # Annual data
+  date = 2022,              # Year of interest
+  bearer = bearer           # Your token
+)
+
+ntl_2023.comuni <- bm_extract(
+  roi_sf = comuni,
+  product_id = "VNP46A4",   # Annual data
+  date = 2023,              # Year of interest
+  bearer = bearer,          # Your token
+  quality_flag_rm = 1
+)
+
+str(ntl_2023.comuni)
+summary(ntl_2023.comuni)
+
+str(ntl_2012)
+summary(ntl_2012)
+```
+
+Visualization as areal data.
+
+```{r}
+library(viridis)
+
+ntl.prov.new = ntl_2022 |> st_as_sf()
+
+# Create the visualization
+ggplot(data = ntl.prov.new) +
+  geom_sf(aes(fill = ntl_mean)) + # Draw regions with fill color based on NTL value, no border
+  scale_fill_viridis(
+    name = "Radiance", # Legend title
+    option = "D",
+  ) +
+  theme_minimal() # Clean, minimal theme
+
+```
+
+
+
+```{r}
+
+library(ggplot2)
+library(patchwork)
+
+ggplot(ntl_2022, aes(x = ntl_mean)) +
+  geom_histogram(binwidth = 0.9, fill = "orange", color = "white") +
+  labs(title = "Distribution of Mean NTL (2022)", x = "Mean Nighttime Light", y = "Count") +
+  theme_minimal()
+
+# Visualization ggregated for region:
+# We can see the region with the most values of radiance
+
+ggplot(ntl_2022, aes(x = reorder(NAME_1, ntl_mean), y = ntl_mean)) +
+  geom_boxplot(fill = "orange") +
+  labs(title = "Regional NTL Variation (2022)", x = "Region", y = "Mean Nighttime Light") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+This is the complete data preparation for the provincial level nighttime lights data for Italy. Next step is to join with the spatial object for the provinces, linked to the responce variable.
+
+# Comuni Data
+
+## Data Preparation
+
+```{r eval=FALSE, include=FALSE}
+# Comuni shapefile from ISTAT official website
+comuni = st_read("Com01012025/Com01012025_WGS84.shp")
+
+ntl_comuni <- bm_extract(
+  roi_sf = comuni,                  # sf with province polygons
+  product_id = "VNP46A4",           # annual product
+  date = 2022,                      # year of interest
+  bearer = bearer,                  # NASA API token
+  aggregation_fun = "mean" )         # statistic to calculate per province
+
+ntl_comuni |> left_join(comuni) |> st_as_sf()
+
+str(comuni)
+
+# Visualizzation
+ggplot(ntl_comuni) +
+  geom_sf(aes(fill = ntl_mean), color = NA) +
+  scale_fill_viridis_c(option = "E", name = 'Radiance') +
+  theme_void() +
+  labs(fill = "Night-time Intensity")
+```
+
+
+
+
+
+## [ Temporal Extraction ] not involved in the analysis but useful for future reference
+```{r}
+date_seq <- seq.Date(from = as.Date("2018-01-01"), to = as.Date("2018-04-01"), by = "month")
+
+ntl_df.prova <- bm_extract(
+  roi_sf = provinces,
+  product_id = "VNP46A3",
+  date = date_seq,      # sequence of monthly dates
+  bearer = bearer
+)
+
+ggplot(ntl_df.prova, aes(x = date, y = ntl_mean, color = NAME_2)) +
+  geom_line() + 
+  labs(title = "Annual Mean Nighttime Lights by Province and Region",
+       x = "Year", y = "NTL Mean") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+-   Sparse Matrix: Most points are likely empty (white) because provinces have relatively few direct neighbors; this is typical for geographic adjacency.
