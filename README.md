@@ -1,4 +1,4 @@
-# Bayesian Spatio-Temporal Modeling of Economic Activity in Italy Using Nighttime Lights
+# Bayesian Spatio-Temporal Modeling of Economic Activity in Italy by means of the information from Satellite Nighttime Lights
 
 <div align="center">
   <img src="./images/first.png" alt="Project Structure" width="300">
